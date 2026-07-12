@@ -1,0 +1,12 @@
+sketchup-be/node_modules/
+sketchup-fe/node_modules/
+
+sketchup-be/.env
+sketchup-fe/.env
+
+sketchup-be/dist
+sketchup-fe/dist
+
+sketchup-be/build
+sketchup-fe/build
+
