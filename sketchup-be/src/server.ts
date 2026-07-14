@@ -31,38 +31,39 @@ const startServer = async (): Promise<void> => {
                 clearInterval(timerInterval);
                 return;
             }
+
             if (room.timer <= 1) {
-                clearInterval(timerInterval); 
+                clearInterval(timerInterval);
 
                 await roomStore.update(roomId, (currentState) => {
                     if (currentState.phase === 'CHOOSING') {
                         currentState.phase = 'DRAWING';
-                        currentState.timer = 60; 
+                        currentState.timer = 60;
                         if (!currentState.currentWord) {
                             const fallbackPool = getRandomWordOptions();
                             currentState.currentWord = fallbackPool[0] ?? 'APPLE';
                             console.log(`Room ${roomId}: Artist failed to pick a word. Auto-assigned: ${currentState.currentWord}`);
                         }
-                    } 
+                    }
                     else if (currentState.phase === 'DRAWING') {
                         currentState.phase = 'LEADERBOARD';
-                        currentState.timer = 10; 
-                    } 
+                        currentState.timer = 10;
+                    }
                     else if (currentState.phase === 'LEADERBOARD') {
                         if (currentState.currentArtistIndex < currentState.players.length - 1) {
                             currentState.currentArtistIndex += 1;
                             currentState.phase = 'CHOOSING';
                             currentState.timer = 15;
                             currentState.players = currentState.players.map(p => ({ ...p, hasGuessed: false }));
-                        } 
+                        }
                         else {
                             if (currentState.currentRound < currentState.totalRounds) {
-                                currentState.currentRound += 1; 
-                                currentState.currentArtistIndex = 0; 
+                                currentState.currentRound += 1;
+                                currentState.currentArtistIndex = 0;
                                 currentState.phase = 'CHOOSING';
                                 currentState.timer = 15;
                                 currentState.players = currentState.players.map(p => ({ ...p, hasGuessed: false }));
-                            } 
+                            }
                             else {
                                 currentState.phase = 'LOBBY';
                                 currentState.timer = 0;
@@ -73,14 +74,26 @@ const startServer = async (): Promise<void> => {
                     }
                     return currentState;
                 });
+
                 const transitionState = await roomStore.get(roomId);
                 if (transitionState) {
                     io.to(roomId).emit('room:state', transitionState);
+
+                    // ⚡ THE FIX: If the clock pushed us into a CHOOSING phase, feed the new artist!
+                    if (transitionState.phase === 'CHOOSING') {
+                        const freshWordPool = getRandomWordOptions();
+                        const activeArtist = transitionState.players[transitionState.currentArtistIndex];
+                        if (activeArtist) {
+                            console.log(`📡 Sending new round words to artist: ${activeArtist.username}`);
+                            io.to(activeArtist.socketId).emit('game:word_options', freshWordPool);
+                        }
+                    }
+
                     if (transitionState.phase !== 'LOBBY') {
                         startRoomTimer(roomId);
                     }
                 }
-            } 
+            }
             else {
                 await roomStore.update(roomId, (currentState) => {
                     currentState.timer -= 1;
@@ -94,8 +107,9 @@ const startServer = async (): Promise<void> => {
     io.on('connection', (socket)=>{
         console.log(`A user connected via socket ID: ${socket.id}`);
         
-        socket.on('room:create', async(data:{username:string})=>{
+        socket.on('room:create', async(data:{username:string, totalRounds?:number})=>{
             const roomId = Math.random().toString(36).substring(2,6).toUpperCase();
+            const configuredRounds = data.totalRounds??3;
             const newPlayer: Player = {
                 socketId: socket.id,
                 username: data.username,
@@ -110,7 +124,7 @@ const startServer = async (): Promise<void> => {
                 currentWord: '',
                 timer: 0,
                 currentRound:0,
-                totalRounds:3,
+                totalRounds:configuredRounds,
                 currentArtistIndex:0
             }
             await roomStore.set(roomId,newRoom);
