@@ -2,7 +2,7 @@
 
 A high-performance, real-time collaborative multiplayer drawing and guessing game built with a modern full-stack TypeScript ecosystem. Players can create private game rooms, customize match parameters, paint on an optimized vector canvas, and guess words in an interactive chat feed featuring an automated speed-based scoring matrix.
 
-🌐 **Live Demo:** sketchup-frontend.vercel.app  
+🌐 **Live Demo:** https://sketchup-frontend.vercel.app  
 🛰️ **Backend API:** https://sketchup-backend-ukat.onrender.com
 
 ---
@@ -141,71 +141,5 @@ Open multiple browser tabs or windows to simulate multiplayer games.
 
 ---
 
-# 🚀 Production Deployment
 
-## Frontend
-
-Deploy to **Vercel**
-
-- Root Directory: `sketchup-fe`
-
----
-
-## Backend
-
-Deploy to **Render** or **Railway**
-
-Root Directory:
-
-```
-sketchup-be
-```
-
-Build Command:
-
-```bash
-npm install --include=dev
-npm run build
-```
-
-Start Command:
-
-```bash
-npm start
-```
-
----
-
-## Database
-
-- Upstash Redis
-- Redis over TLS (`rediss://`)
-- Persistent cloud room storage
-
----
-
-# 🎮 Gameplay
-
-1. Create or join a private room.
-2. Wait for players to join.
-3. Host starts the game.
-4. Current artist chooses one of three words.
-5. Artist draws on the shared canvas.
-6. Other players guess using chat.
-7. Correct guesses earn points based on remaining time.
-8. Leaderboard updates after every round.
-9. Player with the highest score after all rounds wins.
-
----
-
-# 📦 Environment Variables
-
-Backend (`.env`)
-
-```env
-PORT=5000
-REDIS_URL=your_upstash_redis_connection_url
-```
-
-A sample `.env.example` file is included in the repository.
 
