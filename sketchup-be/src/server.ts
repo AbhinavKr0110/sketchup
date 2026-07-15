@@ -190,7 +190,6 @@ const startServer = async (): Promise<void> => {
             }
         });
 
-
         socket.on('game:word_select', async (data: { roomId: string; word: string }) => {
             const targetRoomId = data.roomId.toUpperCase();
             const room = await roomStore.get(targetRoomId);
@@ -212,68 +211,65 @@ const startServer = async (): Promise<void> => {
             }
         });
 
-        socket.on('chat:message', async (data: { roomId: string; text: string }) => {
+        socket.on('message:send', async (data: { roomId: string; message: string }) => {
             const targetRoomId = data.roomId.toUpperCase();
+            const cleanInput = data.message.trim().toUpperCase();
+            if (!cleanInput) return;
+
             const room = await roomStore.get(targetRoomId);
+            if (!room || room.phase !== 'DRAWING') return;
 
-            if (!room) return;
+            const playerIndex = room.players.findIndex(p => p.socketId === socket.id);
+            if (playerIndex === -1) return;
 
-            const sender = room.players.find(p => p.socketId === socket.id);
+            const sender = room.players[playerIndex];
             if (!sender) return;
 
-            const cleanInput = data.text.trim().toUpperCase();
+            if (room.currentArtistIndex === playerIndex) return;
+            if (sender.hasGuessed) return;
+
             const secretWord = room.currentWord.trim().toUpperCase();
+            const isCorrect = cleanInput === secretWord;
 
-            if (room.phase === 'DRAWING' && cleanInput === secretWord) {
-                
-                const artistPlayer = room.players[room.currentArtistIndex];
-                if (artistPlayer && artistPlayer.socketId === socket.id) {
-                    socket.emit('error:msg', 'You cannot guess your own word!');
-                    return;
-                }
-                if (sender.hasGuessed) {
-                    socket.emit('error:msg', 'You have already solved this round!');
-                    return;
-                }
-                const correctGuessersCount = room.players.filter(p => p.hasGuessed).length;
-
-                let pointsEarned = 100;
-                if (correctGuessersCount === 0) pointsEarned = 300;
-                else if (correctGuessersCount === 1) pointsEarned = 200;
+            if (isCorrect) {
+                const currentRemainingTime = room.timer; 
+                const pointsEarned = 50 + (currentRemainingTime * 4);
 
                 await roomStore.update(targetRoomId, (currentState) => {
-                    const matchPlayer = currentState.players.find(p => p.socketId === socket.id);
+                    const matchPlayer = currentState.players[playerIndex];
                     if (matchPlayer) {
                         matchPlayer.score += pointsEarned;
                         matchPlayer.hasGuessed = true;
                     }
+
                     const artistMatch = currentState.players[currentState.currentArtistIndex];
                     if (artistMatch) {
-                        artistMatch.score += 50;
+                        artistMatch.score += 25;
                     }
-
                     return currentState;
                 });
-                const alertText = `🎉 ${sender.username} guessed the secret word! (+${pointsEarned} pts)`;
-                io.to(targetRoomId).emit('chat:broadcast', {
+
+                io.to(targetRoomId).emit('message:received', {
                     username: 'SYSTEM',
-                    text: alertText,
-                    isSystemNotice: true
+                    message: `🎉 ${sender.username} guessed the secret word in ${60 - currentRemainingTime}s! (+${pointsEarned} pts)`,
+                    isSystem: true
                 });
+
                 const freshRoomState = await roomStore.get(targetRoomId);
                 if (freshRoomState) {
                     io.to(targetRoomId).emit('room:state', freshRoomState);
-                    const totalPlayers = freshRoomState.players.length;
-                    const totalGuessers = totalPlayers - 1;
+                    
+                    const totalGuessers = freshRoomState.players.length - 1;
                     const successfulGuessers = freshRoomState.players.filter(p => p.hasGuessed).length;
 
                     if (successfulGuessers >= totalGuessers && totalGuessers > 0) {
-                        console.log(`⚡ Room ${targetRoomId}: All guessers finished early. Shunting clock to Leaderboard.`);
+                        console.log(`⚡ Room ${targetRoomId}: All guessers finished early. Shunting clock.`);
                         await roomStore.update(targetRoomId, (state) => {
                             state.phase = 'LEADERBOARD';
                             state.timer = 10;
                             return state;
                         });
+                        
                         const endgameRoomState = await roomStore.get(targetRoomId);
                         if (endgameRoomState) {
                             io.to(targetRoomId).emit('room:state', endgameRoomState);
@@ -281,45 +277,59 @@ const startServer = async (): Promise<void> => {
                     }
                 }
             } else {
-                io.to(targetRoomId).emit('chat:broadcast', {
+                io.to(targetRoomId).emit('message:received', {
                     username: sender.username,
-                    text: data.text,
-                    isSystemNotice: false
+                    message: data.message,
+                    isSystem: false
                 });
             }
         });
 
-        socket.on('disconnect', async () => {
-            console.log(`User disconnected: ${socket.id}`);
-            const activeRooms = Array.from(socket.rooms);
-            for (const roomId of activeRooms) {
-                if (roomId === socket.id) continue;
+        socket.on('canvas:draw', (data: { roomId: string; x: number; y: number; prevX: number; prevY: number; color: string; size: number }) => {
+            socket.to(data.roomId.toUpperCase()).emit('canvas:draw_client', data);
+        });
 
-                const targetRoomId = roomId.toUpperCase();
-                
-                await roomStore.update(targetRoomId, (currentState) => {
+        socket.on('canvas:clear', (data: { roomId: string }) => {
+            socket.to(data.roomId.toUpperCase()).emit('canvas:clear_client');
+        });
+
+        socket.on('disconnect', async () => {
+            console.log(`🔌 Client Disconnected from pool: ${socket.id}`);
+
+            const activeRooms = Array.from(io.sockets.adapter.rooms.keys());
+
+            for (const roomId of activeRooms) {
+                const room = await roomStore.get(roomId);
+                if (!room) continue;
+
+                const playerIndex = room.players.findIndex(p => p.socketId === socket.id);
+                if (playerIndex === -1) continue;
+
+                console.log(`👤 Scrubbing user "${room.players[playerIndex]?.username}" from room: ${roomId}`);
+
+                await roomStore.update(roomId, (currentState) => {
                     currentState.players = currentState.players.filter(p => p.socketId !== socket.id);
+                    if (currentState.players.length === 0) {
+                        currentState.phase = 'LOBBY';
+                        return currentState;
+                    }
+                    if (room.players[playerIndex]?.isHost && currentState.players[0]) {
+                        currentState.players[0].isHost = true;
+                    }
+                    if (currentState.phase === 'DRAWING' && currentState.currentArtistIndex === playerIndex) {
+                        console.log(`🎨 The active artist disconnected! Shunting room ${roomId} to Leaderboard.`);
+                        currentState.phase = 'LEADERBOARD';
+                        currentState.timer = 5; 
+                    } 
+                    else if (currentState.currentArtistIndex > playerIndex) {
+                        currentState.currentArtistIndex -= 1;
+                    }
+
                     return currentState;
                 });
-                const updatedRoom = await roomStore.get(targetRoomId);
-                if (!updatedRoom) continue;
-                if (updatedRoom.players.length === 0) {
-                    console.log(`Room ${targetRoomId} is completely empty. Purging key structure from Redis.`);
-                    continue;
-                }
-                const hostStillExists = updatedRoom.players.some(p => p.isHost);
-                if (!hostStillExists && updatedRoom.players.length > 0) {
-                    await roomStore.update(targetRoomId, (currentState) => {
-                        if (currentState.players[0]) {
-                            currentState.players[0].isHost = true;
-                            console.log(`Host left Room ${targetRoomId}. Crown passed to: ${currentState.players[0].username}`);
-                        }
-                        return currentState;
-                    });
-                }
-                const finalRoomState = await roomStore.get(targetRoomId);
-                if (finalRoomState) {
-                    io.to(targetRoomId).emit('room:state', finalRoomState);
+                const updatedRoom = await roomStore.get(roomId);
+                if (updatedRoom) {
+                    io.to(roomId).emit('room:state', updatedRoom);
                 }
             }
         });

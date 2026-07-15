@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { socket } from './socket';
 
 interface Player {
@@ -29,14 +29,29 @@ export default function App() {
     const [globalTimer, setGlobalTimer] = useState<number>(0);
     const [roundsSelection, setRoundsSelection] = useState<number>(3);
 
+    const [chatFeed, setChatFeed] = useState<Array<{ username: string; message: string; isSystem: boolean }>>([]);
+    const [typingMessage, setTypingMessage] = useState<string>('');
+
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const isDrawingRef = useRef<boolean>(false);
+    const lastPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+    const [brushColor, setBrushColor] = useState<string>('#4F46E5'); // Default Indigo
+    const [brushSize, setBrushSize] = useState<number>(5);
+
     useEffect(() => {
         socket.on('room:state', (data: GameRoom) => {
             setRoomState(data);
             setGlobalTimer(data.timer);
             setError('');
-            if (data.phase !== 'CHOOSING') {
-                setWordOptions([]);
+            if (data.phase === 'LOBBY' || data.phase === 'CHOOSING') {
+                setChatFeed([]);
+                const canvas = canvasRef.current;
+                if (canvas) {
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
             }
+            if (data.phase !== 'CHOOSING') setWordOptions([]);
         });
 
         socket.on('game:timer', (timeRemaining: number) => {
@@ -47,6 +62,34 @@ export default function App() {
             setWordOptions(options);
         });
 
+        socket.on('message:received', (newMsg: { username: string; message: string; isSystem: boolean }) => {
+            setChatFeed(prev => [...prev, newMsg]);
+        });
+
+        socket.on('canvas:draw_client', (data: { x: number; y: number; prevX: number; prevY: number; color: string; size: number }) => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            ctx.strokeStyle = data.color;
+            ctx.lineWidth = data.size;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            ctx.beginPath();
+            ctx.moveTo(data.prevX, data.prevY);
+            ctx.lineTo(data.x, data.y);
+            ctx.stroke();
+        });
+
+        socket.on('canvas:clear_client', () => {
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+
         socket.on('error:msg', (message: string) => {
             setError(message);
         });
@@ -55,6 +98,9 @@ export default function App() {
             socket.off('room:state');
             socket.off('game:timer');
             socket.off('game:word_options');
+            socket.off('message:received');
+            socket.off('canvas:draw_client');
+            socket.off('canvas:clear_client');
             socket.off('error:msg');
         };
     }, []);
@@ -82,6 +128,71 @@ export default function App() {
         if (roomState) {
             socket.emit('game:word_select', { roomId: roomState.roomId, word });
         }
+    };
+
+    const handleSendMessage = (e: React.SubmitEvent<HTMLFormElement>) => {
+        e.preventDefault();
+        if (!typingMessage.trim() || !roomState) return;
+
+        socket.emit('message:send', { roomId: roomState.roomId, message: typingMessage });
+        setTypingMessage(''); 
+    };
+
+    const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (!isLocalArtist || !roomState || roomState.phase !== 'DRAWING') return;
+        
+        isDrawingRef.current = true;
+
+        lastPosRef.current = {
+            x: e.nativeEvent.offsetX,
+            y: e.nativeEvent.offsetY
+        };
+    };
+
+    const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (!isDrawingRef.current || !isLocalArtist || !roomState || roomState.phase !== 'DRAWING') return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const currentX = e.nativeEvent.offsetX;
+        const currentY = e.nativeEvent.offsetY;
+
+        ctx.strokeStyle = brushColor;
+        ctx.lineWidth = brushSize;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        ctx.beginPath();
+        ctx.moveTo(lastPosRef.current.x, lastPosRef.current.y);
+        ctx.lineTo(currentX, currentY);
+        ctx.stroke();
+
+        socket.emit('canvas:draw', {
+            roomId: roomState.roomId,
+            x: currentX,
+            y: currentY,
+            prevX: lastPosRef.current.x,
+            prevY: lastPosRef.current.y,
+            color: brushColor,
+            size: brushSize
+        });
+
+        lastPosRef.current = { x: currentX, y: currentY };
+    };
+
+    const stopDrawing = () => {
+        isDrawingRef.current = false;
+    };
+
+    const clearCanvas = () => {
+        if (!isLocalArtist || !roomState) return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+        socket.emit('canvas:clear', { roomId: roomState.roomId });
     };
 
     const handleLeaveGame = () => {
@@ -312,11 +423,68 @@ export default function App() {
                         </div>
                     )}
 
-                    <div className="flex-1 flex items-center justify-center bg-slate-50 relative">
-                        <div className="border border-slate-200 rounded-xl w-[92%] h-[90%] flex items-center justify-center text-slate-400 font-bold bg-white shadow-inner">
-                            [ Canvas Sandbox Mount Point ]
-                        </div>
+                <div className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex flex-col justify-between h-[calc(100vh-140px)]">
+
+                    <div className="flex-1 flex justify-center items-center bg-slate-50 border border-slate-100 rounded-lg overflow-hidden shadow-inner min-h-0 mb-3">
+                        <canvas
+                            ref={canvasRef}
+                            onMouseDown={startDrawing}
+                            onMouseMove={draw}
+                            onMouseUp={stopDrawing}
+                            onMouseLeave={stopDrawing}
+                            width={600}
+                            height={500}
+                            className={`bg-white shadow-sm rounded border border-slate-200 max-h-full max-w-full block ${isLocalArtist ? 'cursor-crosshair' : 'cursor-not-allowed'}`}
+                        />
                     </div>
+
+                    {isLocalArtist && roomState.phase === 'DRAWING' && (
+                        <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200 shrink-0">
+                            <div className="flex items-center gap-4">
+
+                                <div className="flex items-center gap-1.5">
+                                    {['#4F46E5', '#EF4444', '#10B981', '#F59E0B', '#000000', '#FFFFFF'].map((color) => (
+                                        <button
+                                            key={color}
+                                            type="button"
+                                            onClick={() => setBrushColor(color)}
+                                            style={{ backgroundColor: color }}
+                                            className={`w-6 h-6 rounded-full transition transform hover:scale-110 cursor-pointer ${
+                                                brushColor === color ? 'ring-2 ring-indigo-600 ring-offset-2 scale-105' : 'border border-slate-300'
+                                            }`}
+                                            title={color === '#FFFFFF' ? "Eraser Tool" : `Color ${color}`}
+                                            aria-label={color === '#FFFFFF' ? "Use Eraser" : `Select color ${color}`}
+                                        />
+                                    ))}
+                                </div>
+
+                                <div className="h-4 w-px bg-slate-300" />
+
+                                <div className="flex items-center gap-2">
+                                    <label htmlFor="brush-size-slider" className="text-xs font-bold text-slate-500 uppercase">Size:</label>
+                                    <input
+                                        id="brush-size-slider"
+                                        type="range"
+                                        min="2"
+                                        max="30"
+                                        value={brushSize}
+                                        onChange={(e) => setBrushSize(parseInt(e.target.value, 10))}
+                                        className="w-24 accent-indigo-600 cursor-pointer"
+                                    />
+                                    <span className="text-xs font-bold text-indigo-600 w-4">{brushSize}px</span>
+                                </div>
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={clearCanvas}
+                                className="bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 font-bold text-xs px-3 py-1.5 rounded-lg transition cursor-pointer"
+                            >
+                                Clear All
+                            </button>
+                        </div>
+                    )}
+                </div>
 
                     {roomState.phase === 'DRAWING' && isLocalArtist && (
                         <div className="h-16 bg-slate-50 border-t border-slate-200 flex items-center justify-between px-6 z-20">
@@ -330,26 +498,43 @@ export default function App() {
                     )}
                 </div>
 
-                <div className="w-80 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
-                    <div className="flex-1 p-4 overflow-y-auto flex flex-col gap-2 bg-white">
-                        <div className="p-2.5 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold border border-emerald-100">
-                            📢 SYSTEM: Connected to room socket pool. Start guessing!
-                        </div>
+                <div className="w-80 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden h-[600px]">
+                    
+                    <div className="flex-1 p-4 overflow-y-auto flex flex-col gap-2 bg-slate-50">
+                        {chatFeed.map((msg, idx) => (
+                            <div 
+                                key={idx} 
+                                className={`p-2 rounded-lg text-xs font-semibold border ${
+                                    msg.isSystem 
+                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
+                                        : 'bg-white text-slate-700 border-slate-200'
+                                }`}
+                            >
+                                <span className="font-bold mr-1">{msg.username}:</span>
+                                <span>{msg.message}</span>
+                            </div>
+                        ))}
                     </div>
 
-                    <div className="p-3 border-t border-slate-200 bg-slate-50">
+                    <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-200 bg-white">
                         <div className="flex gap-2">
                             <input 
                                 type="text" 
+                                value={typingMessage}
+                                onChange={(e) => setTypingMessage(e.target.value)}
                                 placeholder={isLocalArtist ? "You are drawing! Typing blocked." : "Type your guess here..."}
                                 disabled={isLocalArtist}
-                                className="flex-1 p-2.5 rounded-lg border border-slate-200 text-sm outline-none transition focus:border-indigo-500 disabled:bg-slate-200 disabled:text-slate-400"
+                                className="flex-1 p-2.5 rounded-lg border border-slate-200 text-sm outline-none transition focus:border-indigo-500 disabled:bg-slate-100 disabled:text-slate-400"
                             />
-                            <button disabled={isLocalArtist} className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold text-sm px-4 rounded-lg transition shadow-sm cursor-pointer">
+                            <button 
+                                type="submit"
+                                disabled={isLocalArtist || !typingMessage.trim()} 
+                                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold text-sm px-4 rounded-lg transition shadow-sm cursor-pointer"
+                            >
                                 Send
                             </button>
                         </div>
-                    </div>
+                    </form>
                 </div>
 
             </div>
